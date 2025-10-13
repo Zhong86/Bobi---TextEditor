@@ -1,4 +1,4 @@
-//DELETE KEY
+//Text viewer
 
 /*** LIBRARIES ***/
 #include <errno.h>
