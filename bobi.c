@@ -1,4 +1,4 @@
-/* Colorful search results */
+/* 164 */
 
 /*** LIBRARIES ***/
 #define _DEFAULT_SOURCE
@@ -22,6 +22,7 @@
 #define BOBI_VERSION "0.0.1"
 #define BOBI_TAB_STOP 8
 #define BOBI_QUIT_TIMES 3
+#define ABUF_INIT {NULL, 0}
 
 enum editorKey {
   BACKSPACE = 127, 
@@ -36,18 +37,12 @@ enum editorKey {
   PAGE_DOWN
 };
 
-enum editorHighlight {
-  HL_NORMAL = 0,
-  HL_NUMBER
-};
-
 /***  DATA  ***/
 typedef struct erow {
   int size; 
   int rsize; 
   char *chars;
   char *render; 
-  unsigned char *hl; 
 } erow; 
 
 struct editorConfig {
@@ -63,7 +58,6 @@ struct editorConfig {
   char *filename;
   char statusmsg[80]; 
   time_t statusmsg_time; 
-
   struct termios orig_termios;
 }; 
 
@@ -73,8 +67,6 @@ struct abuf {
   char *b; 
   int len; 
 };
-#define ABUF_INIT {NULL, 0}
-
 
 /***  FUNCTIONS  ***/
 void enableRawMode();
@@ -104,9 +96,7 @@ void editorRowAppendString(erow *row, char *s, size_t len);
 void editorInsertRow(int at, char *s, size_t len); 
 void editorInsertNewLine(); 
 char *editorPrompt(char *promt, void (*callback)(char *, int)); 
-int editorRowToCx(erow *row, int rx); 
-void editorUpdateSyntax(erow *row); 
-int editorSyntaxToColor(int hl);
+int editorRowRxToCx(erow *row, int rx);
 
 /***  INIT  ***/
 int main(int argc, char *argv[]) {
@@ -307,7 +297,6 @@ void editorUpdateRow(erow *row) {
   row->render[idx] = '\0'; 
   row->rsize = idx; 
 
-  editorUpdateSyntax(row); 
 }
 
 void editorInsertRow(int at, char *s, size_t len) {
@@ -323,7 +312,6 @@ void editorInsertRow(int at, char *s, size_t len) {
   
   E.row[at].rsize = 0; 
   E.row[at].render = NULL; 
-  E.row[at].hl = NULL; 
 
   editorUpdateRow(&E.row[at]); 
   E.numrows++; 
@@ -333,7 +321,6 @@ void editorInsertRow(int at, char *s, size_t len) {
 void editorFreeRow(erow *row) {
   free(row->render); 
   free(row->chars); 
-  free(row->hl); 
 }
 
 void editorDelRow(int at) {
@@ -436,6 +423,7 @@ char *editorRowsToString(int *buflen) {
 void editorOpen(char *filename) {
   free(E.filename); 
   E.filename = strdup(filename); 
+  
 
   FILE *fp = fopen(filename, "r"); 
   if(!fp) die("fopen"); 
@@ -486,7 +474,7 @@ void editorSave() {
 void editorFindCallback(char *query, int key) {
   static int last_match = -1; 
   static int direction = 1; 
-
+ 
   if (key == '\r' || key == '\x1b') {
     last_match = -1; 
     direction = 1; 
@@ -513,9 +501,11 @@ void editorFindCallback(char *query, int key) {
     char *match = strstr(row->render, query); //Check if query is a substring of current row; 
     if (match) { //if yes then point to substring
       last_match = current; 
-      E.cy = i; 
-      E.cx = editorRowToCx(row, match - row->render); 
+      E.cy = current; 
+      E.cx = editorRowRxToCx(row, match - row->render); 
       E.rowoff = E.numrows; 
+      
+       
       break; 
     }
   }
@@ -761,29 +751,8 @@ void editorDrawRows(struct abuf *ab) {
       int len = E.row[filerow].rsize - E.coloff;
       if (len < 0) len = 0; 
       if (len > E.screencols) len = E.screencols; 
-      char *c = &E.row[filerow].render[E.coloff]; 
-      unsigned char *hl = &E.row[filerow].hl[E.coloff]; 
-      int current_color = -1; 
-      int j; 
-      for (j = 0;j < len;j++) {
-        if (hl[j] == HL_NORMAL) {
-          if (current_color != -1) {
-            abAppend(ab, "\x1b[39m", 5); 
-            current_color = -1; 
-          }
-          abAppend(ab, &c[j], 1); 
-        } else {
-          int color = editorSyntaxToColor(hl[j]); 
-          if (color != current_color) {
-            current_color = color; 
-            char buf[16]; 
-            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color); 
-            abAppend(ab, buf, clen); 
-          }
-          abAppend(ab, &c[j], 1); 
-        }
-      }
-      abAppend(ab, "\x1b[39m", 5); 
+      abAppend(ab, &E.row[filerow].render[E.coloff], len);
+
     }
     abAppend(ab, "\x1b[K", 3); 
     abAppend(ab, "\r\n", 2); 
@@ -796,8 +765,8 @@ void editorDrawStatusBar(struct abuf *ab) {
   int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", 
                      E.filename ? E.filename : "[No Name]", E.numrows, 
                      E.dirty ? "(modified)" : ""); 
-  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows); 
-
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
+                      E.cy + 1, E.numrows);
   if (len > E.screencols) len = E.screencols; 
   abAppend(ab, status, len); 
   while (len < E.screencols) {
@@ -845,22 +814,4 @@ void abFree(struct abuf *ab) {
   free(ab->b); 
 }
 
-/*** SYNTAX HIGHLIGHTING ***/
-void editorUpdateSyntax(erow *row) {
-  row->hl = realloc(row->hl, row->rsize);
-  memset(row->hl, HL_NORMAL, row->rsize); 
 
-  int i; 
-  for (i =0;i<row->rsize;i++) {
-    if (isdigit(row->render[i])) {
-      row->hl[i] = HL_NUMBER; 
-    }
-  }
-}
-
-int editorSyntaxToColor(int hl) {
-  switch(hl) {
-    case HL_NUMBER: return 31; 
-    default: return 37; 
-  }
-}
